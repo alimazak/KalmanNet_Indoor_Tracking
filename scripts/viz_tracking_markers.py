@@ -1,4 +1,5 @@
 from collections import deque
+import math
 
 import rclpy
 from rclpy.node import Node
@@ -33,11 +34,11 @@ class TrackingViz(Node):
 
         self.gt_topic = self.declare_parameter("gt_topic", "/ground_truth/odom").value
         self.est_topic = self.declare_parameter("est_topic", "/tracking/odom").value
-
         self.out_topic = self.declare_parameter("out_topic", "/viz/markers").value
 
-        self.max_points = int(self.declare_parameter("max_points", 2000).value)
+        self.max_points = int(self.declare_parameter("max_points", 3000).value)
         self.pub_rate = float(self.declare_parameter("pub_rate", 10.0).value)
+        self.min_step = float(self.declare_parameter("min_step", 0.02).value)  # 2 cm
 
         if not self.layout_file:
             raise RuntimeError("layout_file zorunlu.")
@@ -47,7 +48,6 @@ class TrackingViz(Node):
 
         self.gt_xy = None
         self.est_xy = None
-
         self.gt_trail = deque(maxlen=self.max_points)
         self.est_trail = deque(maxlen=self.max_points)
 
@@ -63,20 +63,27 @@ class TrackingViz(Node):
         self.sub_est = self.create_subscription(Odometry, self.est_topic, self.on_est, 10)
 
         self.timer = self.create_timer(1.0 / self.pub_rate, self.on_timer)
-
         self.get_logger().info(f"Publishing markers: {self.out_topic}")
+
+    def _append_if_moved(self, trail, x, y):
+        if not trail:
+            trail.append((x, y))
+            return
+        x0, y0 = trail[-1]
+        if math.hypot(x - x0, y - y0) >= self.min_step:
+            trail.append((x, y))
 
     def on_gt(self, msg: Odometry):
         x = msg.pose.pose.position.x
         y = msg.pose.pose.position.y
         self.gt_xy = (x, y)
-        self.gt_trail.append((x, y))
+        self._append_if_moved(self.gt_trail, x, y)
 
     def on_est(self, msg: Odometry):
         x = msg.pose.pose.position.x
         y = msg.pose.pose.position.y
         self.est_xy = (x, y)
-        self.est_trail.append((x, y))
+        self._append_if_moved(self.est_trail, x, y)
 
     def _sensor_markers(self, stamp):
         arr = []
@@ -152,13 +159,15 @@ class TrackingViz(Node):
         out = MarkerArray()
         out.markers.extend(self._sensor_markers(stamp))
 
+        # GT: yeşil
         if self.gt_xy is not None:
             out.markers.append(self._sphere(stamp, "gt", 1000, self.gt_xy, 0.1, 0.9, 0.1))
             out.markers.append(self._trail(stamp, "gt_trail", 2000, self.gt_trail, 0.1, 0.9, 0.1))
 
+        # EKF: mavi
         if self.est_xy is not None:
-            out.markers.append(self._sphere(stamp, "ekf", 1001, self.est_xy, 0.95, 0.1, 0.1))
-            out.markers.append(self._trail(stamp, "ekf_trail", 2001, self.est_trail, 0.95, 0.1, 0.1))
+            out.markers.append(self._sphere(stamp, "ekf", 1001, self.est_xy, 0.1, 0.3, 0.95))
+            out.markers.append(self._trail(stamp, "ekf_trail", 2001, self.est_trail, 0.1, 0.3, 0.95))
 
         self.pub.publish(out)
 
