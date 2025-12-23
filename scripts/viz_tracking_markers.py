@@ -32,34 +32,25 @@ class TrackingViz(Node):
         self.layout_file = self.declare_parameter("layout_file", "").value
 
         self.gt_topic = self.declare_parameter("gt_topic", "/ground_truth/odom").value
-        self.ekf_topic = self.declare_parameter("ekf_topic", "/tracking/odom").value
+        self.est_topic = self.declare_parameter("est_topic", "/tracking/odom").value
 
         self.out_topic = self.declare_parameter("out_topic", "/viz/markers").value
 
-        # sensor marker geometry
-        self.sensor_radius = float(self.declare_parameter("sensor_radius", 0.03).value)
-        self.sensor_height = float(self.declare_parameter("sensor_height", 0.5).value)
-
-        # trails
         self.max_points = int(self.declare_parameter("max_points", 2000).value)
         self.pub_rate = float(self.declare_parameter("pub_rate", 10.0).value)
 
         if not self.layout_file:
-            raise RuntimeError("layout_file zorunlu. Örn: -p layout_file:=.../paper_sensors_5x5_b20.csv")
-
+            raise RuntimeError("layout_file zorunlu.")
         self.sensors = load_layout_csv(self.layout_file)
         if not self.sensors:
             raise RuntimeError(f"layout_file okunamadı/boş: {self.layout_file}")
 
-        # cache latest poses
         self.gt_xy = None
-        self.ekf_xy = None
+        self.est_xy = None
 
-        # trail buffers
         self.gt_trail = deque(maxlen=self.max_points)
-        self.ekf_trail = deque(maxlen=self.max_points)
+        self.est_trail = deque(maxlen=self.max_points)
 
-        # QoS: markers latch gibi davransın (RViz sonradan açılırsa da görsün)
         qos_mark = QoSProfile(
             depth=1,
             history=HistoryPolicy.KEEP_LAST,
@@ -69,12 +60,11 @@ class TrackingViz(Node):
         self.pub = self.create_publisher(MarkerArray, self.out_topic, qos_mark)
 
         self.sub_gt = self.create_subscription(Odometry, self.gt_topic, self.on_gt, 10)
-        self.sub_ekf = self.create_subscription(Odometry, self.ekf_topic, self.on_ekf, 10)
+        self.sub_est = self.create_subscription(Odometry, self.est_topic, self.on_est, 10)
 
         self.timer = self.create_timer(1.0 / self.pub_rate, self.on_timer)
 
-        self.get_logger().info(f"Publishing MarkerArray on {self.out_topic}")
-        self.get_logger().info(f"Sensors: {len(self.sensors)} from {self.layout_file}")
+        self.get_logger().info(f"Publishing markers: {self.out_topic}")
 
     def on_gt(self, msg: Odometry):
         x = msg.pose.pose.position.x
@@ -82,32 +72,29 @@ class TrackingViz(Node):
         self.gt_xy = (x, y)
         self.gt_trail.append((x, y))
 
-    def on_ekf(self, msg: Odometry):
+    def on_est(self, msg: Odometry):
         x = msg.pose.pose.position.x
         y = msg.pose.pose.position.y
-        self.ekf_xy = (x, y)
-        self.ekf_trail.append((x, y))
+        self.est_xy = (x, y)
+        self.est_trail.append((x, y))
 
-    def _make_sensor_markers(self, stamp):
+    def _sensor_markers(self, stamp):
         arr = []
-        z = self.sensor_height / 2.0
-
         for i, (x, y) in enumerate(self.sensors):
             m = Marker()
             m.header.stamp = stamp
             m.header.frame_id = self.world_frame
-            m.ns = "paper_sensors"
+            m.ns = "sensors"
             m.id = i
             m.type = Marker.CYLINDER
             m.action = Marker.ADD
             m.pose.position.x = x
             m.pose.position.y = y
-            m.pose.position.z = z
+            m.pose.position.z = 0.25
             m.pose.orientation.w = 1.0
-            m.scale.x = 2.0 * self.sensor_radius
-            m.scale.y = 2.0 * self.sensor_radius
-            m.scale.z = self.sensor_height
-            # grey
+            m.scale.x = 0.06
+            m.scale.y = 0.06
+            m.scale.z = 0.5
             m.color.r = 0.7
             m.color.g = 0.7
             m.color.b = 0.7
@@ -115,7 +102,7 @@ class TrackingViz(Node):
             arr.append(m)
         return arr
 
-    def _make_point_marker(self, stamp, ns, mid, xy, r, g, b, scale=0.25, z=0.10):
+    def _sphere(self, stamp, ns, mid, xy, r, g, b):
         m = Marker()
         m.header.stamp = stamp
         m.header.frame_id = self.world_frame
@@ -125,18 +112,18 @@ class TrackingViz(Node):
         m.action = Marker.ADD
         m.pose.position.x = float(xy[0])
         m.pose.position.y = float(xy[1])
-        m.pose.position.z = z
+        m.pose.position.z = 0.10
         m.pose.orientation.w = 1.0
-        m.scale.x = scale
-        m.scale.y = scale
-        m.scale.z = scale
+        m.scale.x = 0.30
+        m.scale.y = 0.30
+        m.scale.z = 0.30
         m.color.r = r
         m.color.g = g
         m.color.b = b
         m.color.a = 1.0
         return m
 
-    def _make_trail_marker(self, stamp, ns, mid, trail, r, g, b, width=0.06, z=0.05):
+    def _trail(self, stamp, ns, mid, trail, r, g, b):
         m = Marker()
         m.header.stamp = stamp
         m.header.frame_id = self.world_frame
@@ -145,7 +132,7 @@ class TrackingViz(Node):
         m.type = Marker.LINE_STRIP
         m.action = Marker.ADD
         m.pose.orientation.w = 1.0
-        m.scale.x = width
+        m.scale.x = 0.06
         m.color.r = r
         m.color.g = g
         m.color.b = b
@@ -155,7 +142,7 @@ class TrackingViz(Node):
             p = Point()
             p.x = float(x)
             p.y = float(y)
-            p.z = float(z)
+            p.z = 0.05
             pts.append(p)
         m.points = pts
         return m
@@ -163,18 +150,15 @@ class TrackingViz(Node):
     def on_timer(self):
         stamp = self.get_clock().now().to_msg()
         out = MarkerArray()
+        out.markers.extend(self._sensor_markers(stamp))
 
-        # sensors
-        out.markers.extend(self._make_sensor_markers(stamp))
-
-        # GT + EKF imleç
         if self.gt_xy is not None:
-            out.markers.append(self._make_point_marker(stamp, "gt", 1000, self.gt_xy, 0.1, 0.9, 0.1, scale=0.28))
-            out.markers.append(self._make_trail_marker(stamp, "gt_trail", 2000, self.gt_trail, 0.1, 0.9, 0.1))
+            out.markers.append(self._sphere(stamp, "gt", 1000, self.gt_xy, 0.1, 0.9, 0.1))
+            out.markers.append(self._trail(stamp, "gt_trail", 2000, self.gt_trail, 0.1, 0.9, 0.1))
 
-        if self.ekf_xy is not None:
-            out.markers.append(self._make_point_marker(stamp, "ekf", 1001, self.ekf_xy, 0.95, 0.1, 0.1, scale=0.28))
-            out.markers.append(self._make_trail_marker(stamp, "ekf_trail", 2001, self.ekf_trail, 0.95, 0.1, 0.1))
+        if self.est_xy is not None:
+            out.markers.append(self._sphere(stamp, "ekf", 1001, self.est_xy, 0.95, 0.1, 0.1))
+            out.markers.append(self._trail(stamp, "ekf_trail", 2001, self.est_trail, 0.95, 0.1, 0.1))
 
         self.pub.publish(out)
 
