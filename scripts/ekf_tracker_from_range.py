@@ -1,5 +1,7 @@
 import math
 from collections import deque
+from ros_gz_interfaces.srv import SetEntityPose
+from ros_gz_interfaces.msg import Entity
 
 import rclpy
 from rclpy.node import Node
@@ -117,6 +119,13 @@ class EKFRange(Node):
 
         # Reset service
         self.srv_reset = self.create_service(Empty, "/tracking/reset", self.on_reset)
+        # --- Gazebo proxy (EKF trail için) ---
+        self.gz_world = self.declare_parameter("gz_world", "empty_world").value
+        self.gz_entity = self.declare_parameter("gz_entity", "ekf_proxy").value
+        self.gz_z = float(self.declare_parameter("gz_z", 0.01).value)
+
+        self._gz_cli = self.create_client(SetEntityPose, f"/world/{self.gz_world}/set_pose")
+        self._gz_pending = False
 
         self.get_logger().info("EKF(range) ready. Waiting for /range/z...")
 
@@ -244,6 +253,8 @@ class EKFRange(Node):
         od.twist.twist.linear.y = float(self.x[3, 0])
         self.pub_odom.publish(od)
 
+        self._push_proxy_to_gazebo(self.x[0, 0], self.x[1, 0])
+
         ps = PoseStamped()
         ps.header.stamp = now
         ps.header.frame_id = "world"
@@ -270,6 +281,34 @@ class EKFRange(Node):
             self._e2_win.append(e*e)
             rmse_w = math.sqrt(sum(self._e2_win) / max(1, len(self._e2_win)))
             self.pub_rmse_win.publish(Float32(data=float(rmse_w)))
+
+    def _push_proxy_to_gazebo(self, x, y):
+        if self._gz_pending:
+            return
+        if not self._gz_cli.service_is_ready():
+            # servis henüz gelmediyse bekleme yok, sonraki callback'te tekrar dener
+            return
+
+        req = SetEntityPose.Request()
+        req.entity.name = self.gz_entity
+        if hasattr(req.entity, "type"):
+            req.entity.type = Entity.MODEL
+
+        req.pose.position.x = float(x)
+        req.pose.position.y = float(y)
+        req.pose.position.z = float(self.gz_z)
+        req.pose.orientation.w = 1.0
+
+        self._gz_pending = True
+        fut = self._gz_cli.call_async(req)
+        fut.add_done_callback(self._on_gz_done)
+
+    def _on_gz_done(self, fut):
+        self._gz_pending = False
+        try:
+            fut.result()
+        except Exception as e:
+            self.get_logger().warn(f"set_pose failed: {e}")
 
 
 def main():
