@@ -69,7 +69,7 @@ class EKFRange(Node):
         self.delta = float(self.declare_parameter("delta", 0.1).value)  # Δ = 1/rate
         self.tau = float(self.declare_parameter("tau", 1.0).value)      # τ
 
-        self.init_from_gt = bool(self.declare_parameter("init_from_gt", True).value)
+        self.init_from_gt = bool(self.declare_parameter("init_from_gt", False).value)
         self.init_pos_std = float(self.declare_parameter("init_pos_std", 5.0).value)
         self.init_vel_std = float(self.declare_parameter("init_vel_std", 2.0).value)
 
@@ -167,6 +167,36 @@ class EKFRange(Node):
             H[i, 1] = dy / d
         return H
 
+    def estimate_xy_from_ranges_ls(self, z):
+        # z: (N,) numpy array
+        # For stability, pick the sensor with the smallest range as reference
+        z = np.asarray(z, dtype=float).reshape(-1)
+        if self.N < 2:
+            raise ValueError(f"Need at least 2 sensors for LS init, got N={self.N}")
+
+        k0 = int(np.argmin(z))
+        x0, y0 = self.sensors[k0]
+        z0 = float(abs(z[k0]))
+
+        A = []
+        b = []
+        for i, (xi, yi) in enumerate(self.sensors):
+            if i == k0:
+                continue
+            zi = float(abs(z[i]))
+            # 2*x*(xi-x0) + 2*y*(yi-y0) = (xi^2 - x0^2 + yi^2 - y0^2) - (zi^2 - z0^2)
+            A.append([2.0 * (xi - x0), 2.0 * (yi - y0)])
+            b.append((xi*xi - x0*x0 + yi*yi - y0*y0) - (zi*zi - z0*z0))
+
+        A = np.array(A, dtype=float)
+        b = np.array(b, dtype=float)
+
+        xy, *_ = np.linalg.lstsq(A, b, rcond=None)
+        return float(xy[0]), float(xy[1])
+
+    def init_xy_from_ranges_ls(self, z: np.ndarray):
+        return self.estimate_xy_from_ranges_ls(z)
+
     def on_reset(self, req, resp):
         self.x[:] = 0.0
         self.P = self.P0.copy()
@@ -214,7 +244,12 @@ class EKFRange(Node):
                 self.x[3, 0] = self.gt_vy
                 self.get_logger().warn("EKF initialized from ground truth (sanity-check).")
             else:
-                self.get_logger().warn("EKF initialized from zeros (no GT init).")
+                x_init, y_init = self.estimate_xy_from_ranges_ls(z)
+                self.x[0, 0] = x_init
+                self.x[1, 0] = y_init
+                self.x[2, 0] = 0.0
+                self.x[3, 0] = 0.0
+                self.get_logger().warn(f"EKF initialized from ranges (LS): x={x_init:.2f}, y={y_init:.2f}")
             self.initialized = True
 
         # Predict
