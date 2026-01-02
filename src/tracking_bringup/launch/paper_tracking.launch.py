@@ -40,6 +40,12 @@ def generate_launch_description():
         description="Tracking pipeline namespace. '' yaparsan namespace kapatılır."
     )
 
+    # ✅ NEW: sim-time switch
+    use_sim_time_arg = DeclareLaunchArgument(
+        "use_sim_time", default_value="true",
+        description="Use Gazebo /clock (sim time) for tracking pipeline nodes."
+    )
+
     gz_world_arg = DeclareLaunchArgument(
         "gz_world", default_value="empty_world",
         description="Gazebo world name (SetEntityPose service yolu için)."
@@ -71,7 +77,7 @@ def generate_launch_description():
         rate  = LaunchConfiguration("rate").perform(context)
         delta = LaunchConfiguration("delta").perform(context)
         tau   = LaunchConfiguration("tau").perform(context)
-        init_from_gt = LaunchConfiguration("init_from_gt").perform(context).lower()
+        init_from_gt = LaunchConfiguration("init_from_gt").perform(context).strip().lower()
 
         tracking_ns = LaunchConfiguration("tracking_ns").perform(context).strip().strip("/")
         ns_remap = f"__ns:=/{tracking_ns}" if tracking_ns else "__ns:=/"
@@ -79,6 +85,11 @@ def generate_launch_description():
         gz_world  = LaunchConfiguration("gz_world").perform(context)
         gz_entity = LaunchConfiguration("gz_entity").perform(context)
 
+        # ✅ NEW: normalize use_sim_time to "true"/"false"
+        use_sim_time_raw = LaunchConfiguration("use_sim_time").perform(context).strip().lower()
+        use_sim_time = "true" if use_sim_time_raw in ("true", "1", "yes", "on") else "false"
+
+        # --- Include: Gazebo ---
         gazebo_launch = IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(
@@ -90,6 +101,7 @@ def generate_launch_description():
             launch_arguments={"world_name": world_name}.items(),
         )
 
+        # --- Include: Controller ---
         controller_launch = IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(
@@ -101,6 +113,7 @@ def generate_launch_description():
         )
         controller_delayed = TimerAction(period=3.0, actions=[controller_launch])
 
+        # --- Bridge: Gazebo -> ROS PoseArray ---
         bridge_topic = f"/world/{gz_world}/dynamic_pose/info@geometry_msgs/msg/PoseArray[gz.msgs.Pose_V"
         bridge_ros_in = f"/world/{gz_world}/dynamic_pose/info"
 
@@ -113,6 +126,7 @@ def generate_launch_description():
             remappings=[(bridge_ros_in, "/gz/dynamic_poses")],
         )
 
+        # --- Script paths ---
         ws_root = os.path.join(os.path.expanduser("~"), "KalmanNet_Indoor_Tracking")
         scripts_dir = os.path.join(ws_root, "scripts")
 
@@ -134,12 +148,14 @@ def generate_launch_description():
         rmse_w_topic = "metrics/rmse_window"
         markers_topic = "viz/markers"
 
+        # --- GT Odom node ---
         gt_odom = ExecuteProcess(
             cmd=[
                 "python3", gt_posearray_to_odom_py,
                 "--ros-args",
                 "-r", ns_remap,
                 "-r", "__node:=gt_posearray_to_odom",
+                "-p", f"use_sim_time:={use_sim_time}",
                 "-p", "pose_topic:=/gz/dynamic_poses",
                 "-p", f"odom_topic:={gt_odom_topic}",
                 "-p", "world_frame:=world",
@@ -149,12 +165,14 @@ def generate_launch_description():
             output="screen",
         )
 
+        # --- RANGE generator ---
         range_gen = ExecuteProcess(
             cmd=[
                 "python3", range_measurements_py,
                 "--ros-args",
                 "-r", ns_remap,
                 "-r", "__node:=range_measurement_generator",
+                "-p", f"use_sim_time:={use_sim_time}",
                 "-p", f"layout_file:={layout_file}",
                 "-p", f"sigma:={sigma}",
                 "-p", f"rate:={rate}",
@@ -165,12 +183,14 @@ def generate_launch_description():
             output="screen",
         )
 
+        # --- EKF (range) ---
         ekf = ExecuteProcess(
             cmd=[
                 "python3", ekf_from_range_py,
                 "--ros-args",
                 "-r", ns_remap,
                 "-r", "__node:=ekf",
+                "-p", f"use_sim_time:={use_sim_time}",
                 "-p", f"layout_file:={layout_file}",
                 "-p", f"z_topic:={z_topic}",
                 "-p", f"est_topic:={est_topic}",
@@ -183,12 +203,14 @@ def generate_launch_description():
             output="screen",
         )
 
+        # --- Metrics node ---
         metrics = ExecuteProcess(
             cmd=[
                 "python3", metrics_py,
                 "--ros-args",
                 "-r", ns_remap,
                 "-r", "__node:=metrics",
+                "-p", f"use_sim_time:={use_sim_time}",
                 "-p", f"gt_topic:={gt_odom_topic}",
                 "-p", f"est_topic:={est_topic}",
                 "-p", f"error_topic:={err_topic}",
@@ -199,12 +221,14 @@ def generate_launch_description():
             output="screen",
         )
 
+        # --- Gazebo proxy node ---
         gz_proxy = ExecuteProcess(
             cmd=[
                 "python3", gz_proxy_py,
                 "--ros-args",
                 "-r", ns_remap,
                 "-r", "__node:=gz_proxy",
+                "-p", f"use_sim_time:={use_sim_time}",
                 "-p", f"est_topic:={est_topic}",
                 "-p", f"gz_world:={gz_world}",
                 "-p", f"gz_entity:={gz_entity}",
@@ -213,12 +237,14 @@ def generate_launch_description():
             output="screen",
         )
 
+        # --- Marker viz node ---
         viz = ExecuteProcess(
             cmd=[
                 "python3", viz_markers_py,
                 "--ros-args",
                 "-r", ns_remap,
                 "-r", "__node:=viz",
+                "-p", f"use_sim_time:={use_sim_time}",
                 "-p", f"layout_file:={layout_file}",
                 "-p", "world_frame:=world",
                 "-p", f"gt_topic:={gt_odom_topic}",
@@ -228,6 +254,7 @@ def generate_launch_description():
             output="screen",
         )
 
+        # --- world->odom TF (opsiyonel) ---
         static_tf = Node(
             package="tf2_ros",
             executable="static_transform_publisher",
@@ -237,6 +264,7 @@ def generate_launch_description():
             condition=IfCondition(LaunchConfiguration("publish_world_tf")),
         )
 
+        # --- RViz2 (opsiyonel) ---
         rviz_cfg = LaunchConfiguration("rviz_config").perform(context)
         if rviz_cfg.strip():
             rviz = Node(
@@ -245,6 +273,7 @@ def generate_launch_description():
                 output="screen",
                 arguments=["-d", rviz_cfg],
                 condition=IfCondition(LaunchConfiguration("use_rviz")),
+                parameters=[{"use_sim_time": (use_sim_time == "true")}],
             )
         else:
             rviz = Node(
@@ -252,8 +281,10 @@ def generate_launch_description():
                 executable="rviz2",
                 output="screen",
                 condition=IfCondition(LaunchConfiguration("use_rviz")),
+                parameters=[{"use_sim_time": (use_sim_time == "true")}],
             )
 
+        # Gazebo başladıktan sonra pipeline’ı başlat
         pipeline_delayed = TimerAction(
             period=2.0,
             actions=[bridge_dynamicposes, gt_odom, range_gen, ekf, metrics, gz_proxy, viz, static_tf, rviz],
@@ -267,6 +298,7 @@ def generate_launch_description():
         sigma_arg, rate_arg, delta_arg, tau_arg,
         init_from_gt_arg,
         tracking_ns_arg,
+        use_sim_time_arg,          # ✅ added
         gz_world_arg, gz_entity_arg,
         publish_world_tf_arg,
         use_rviz_arg, rviz_config_arg,
