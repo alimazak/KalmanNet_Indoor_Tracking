@@ -1,17 +1,46 @@
-from collections import deque
+#!/usr/bin/env python3
+"""
+viz_tracking_markers.py
+
+RViz MarkerArray visualization for:
+  - sensors (from layout CSV)
+  - ground-truth trail (Odometry)
+  - estimator trail (Odometry)
+
+Sub:
+  - gt_topic  (nav_msgs/Odometry) default: /ground_truth/odom
+  - est_topic (nav_msgs/Odometry) default: /tracking/estimated
+
+Pub:
+  - marker_topic (visualization_msgs/MarkerArray) default: /viz/markers
+
+Params:
+  - layout_file (required)
+  - world_frame
+  - max_points, pub_rate, min_step
+
+Compatibility:
+  - If you used an older param name "out_topic", it is still accepted as fallback.
+"""
+
+from __future__ import annotations
+
 import math
+from collections import deque
+from typing import Deque, List, Optional, Tuple
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 
-from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Point
+from nav_msgs.msg import Odometry
 from visualization_msgs.msg import Marker, MarkerArray
 
 
-def load_layout_csv(path: str):
-    pts = []
+def load_layout_csv(path: str) -> List[Tuple[float, float]]:
+    """CSV: each line 'x,y' or 'x y' (comments with '#'). Returns list[(x,y)]."""
+    pts: List[Tuple[float, float]] = []
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             s = line.strip()
@@ -26,46 +55,61 @@ def load_layout_csv(path: str):
 
 
 class TrackingViz(Node):
-    def __init__(self):
-        super().__init__("tracking_viz_markers")
+    def __init__(self) -> None:
+        super().__init__("viz")
 
-        self.world_frame = self.declare_parameter("world_frame", "world").value
-        self.layout_file = self.declare_parameter("layout_file", "").value
+        # ---------------- Params ----------------
+        self.world_frame: str = str(self.declare_parameter("world_frame", "world").value)
 
-        self.gt_topic = self.declare_parameter("gt_topic", "/ground_truth/odom").value
-        self.est_topic = self.declare_parameter("est_topic", "/tracking/odom").value
-        self.out_topic = self.declare_parameter("out_topic", "/viz/markers").value
-
-        self.max_points = int(self.declare_parameter("max_points", 3000).value)
-        self.pub_rate = float(self.declare_parameter("pub_rate", 10.0).value)
-        self.min_step = float(self.declare_parameter("min_step", 0.02).value)  # 2 cm
-
+        self.layout_file: str = str(self.declare_parameter("layout_file", "").value)
         if not self.layout_file:
-            raise RuntimeError("layout_file zorunlu.")
-        self.sensors = load_layout_csv(self.layout_file)
+            raise RuntimeError("layout_file zorunlu. Örn: -p layout_file:=.../paper_sensors_5x5_b20.csv")
+
+        self.gt_topic: str = str(self.declare_parameter("gt_topic", "/ground_truth/odom").value)
+        self.est_topic: str = str(self.declare_parameter("est_topic", "/tracking/estimated").value)
+
+        # Canonical param:
+        marker_topic_param = self.declare_parameter("marker_topic", "").value
+        # Backward-compat alias:
+        out_topic_param = self.declare_parameter("out_topic", "/viz/markers").value
+
+        self.marker_topic: str = str(marker_topic_param).strip() if str(marker_topic_param).strip() else str(out_topic_param)
+
+        self.max_points: int = int(self.declare_parameter("max_points", 3000).value)
+        self.pub_rate: float = float(self.declare_parameter("pub_rate", 10.0).value)
+        self.min_step: float = float(self.declare_parameter("min_step", 0.02).value)  # meters
+
+        # ---------------- Layout ----------------
+        self.sensors: List[Tuple[float, float]] = load_layout_csv(self.layout_file)
         if not self.sensors:
             raise RuntimeError(f"layout_file okunamadı/boş: {self.layout_file}")
 
-        self.gt_xy = None
-        self.est_xy = None
-        self.gt_trail = deque(maxlen=self.max_points)
-        self.est_trail = deque(maxlen=self.max_points)
+        # ---------------- State ----------------
+        self.gt_xy: Optional[Tuple[float, float]] = None
+        self.est_xy: Optional[Tuple[float, float]] = None
+        self.gt_trail: Deque[Tuple[float, float]] = deque(maxlen=self.max_points)
+        self.est_trail: Deque[Tuple[float, float]] = deque(maxlen=self.max_points)
 
-        qos_mark = QoSProfile(
+        # ---------------- ROS I/O ----------------
+        qos_markers = QoSProfile(
             depth=1,
             history=HistoryPolicy.KEEP_LAST,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
-        self.pub = self.create_publisher(MarkerArray, self.out_topic, qos_mark)
+        self._pub = self.create_publisher(MarkerArray, self.marker_topic, qos_markers)
 
-        self.sub_gt = self.create_subscription(Odometry, self.gt_topic, self.on_gt, 10)
-        self.sub_est = self.create_subscription(Odometry, self.est_topic, self.on_est, 10)
+        self.create_subscription(Odometry, self.gt_topic, self._on_gt, qos_profile_sensor_data)
+        self.create_subscription(Odometry, self.est_topic, self._on_est, qos_profile_sensor_data)
 
-        self.timer = self.create_timer(1.0 / self.pub_rate, self.on_timer)
-        self.get_logger().info(f"Publishing markers: {self.out_topic}")
+        self._timer = self.create_timer(1.0 / max(1e-6, self.pub_rate), self._on_timer)
 
-    def _append_if_moved(self, trail, x, y):
+        self.get_logger().info(
+            f"Viz up. pub={self.marker_topic} sub(gt)={self.gt_topic} sub(est)={self.est_topic} "
+            f"sensors={len(self.sensors)} max_points={self.max_points}"
+        )
+
+    def _append_if_moved(self, trail: Deque[Tuple[float, float]], x: float, y: float) -> None:
         if not trail:
             trail.append((x, y))
             return
@@ -73,20 +117,20 @@ class TrackingViz(Node):
         if math.hypot(x - x0, y - y0) >= self.min_step:
             trail.append((x, y))
 
-    def on_gt(self, msg: Odometry):
-        x = msg.pose.pose.position.x
-        y = msg.pose.pose.position.y
+    def _on_gt(self, msg: Odometry) -> None:
+        x = float(msg.pose.pose.position.x)
+        y = float(msg.pose.pose.position.y)
         self.gt_xy = (x, y)
         self._append_if_moved(self.gt_trail, x, y)
 
-    def on_est(self, msg: Odometry):
-        x = msg.pose.pose.position.x
-        y = msg.pose.pose.position.y
+    def _on_est(self, msg: Odometry) -> None:
+        x = float(msg.pose.pose.position.x)
+        y = float(msg.pose.pose.position.y)
         self.est_xy = (x, y)
         self._append_if_moved(self.est_trail, x, y)
 
-    def _sensor_markers(self, stamp):
-        arr = []
+    def _sensor_markers(self, stamp) -> List[Marker]:
+        arr: List[Marker] = []
         for i, (x, y) in enumerate(self.sensors):
             m = Marker()
             m.header.stamp = stamp
@@ -95,8 +139,8 @@ class TrackingViz(Node):
             m.id = i
             m.type = Marker.CYLINDER
             m.action = Marker.ADD
-            m.pose.position.x = x
-            m.pose.position.y = y
+            m.pose.position.x = float(x)
+            m.pose.position.y = float(y)
             m.pose.position.z = 0.25
             m.pose.orientation.w = 1.0
             m.scale.x = 0.06
@@ -109,7 +153,7 @@ class TrackingViz(Node):
             arr.append(m)
         return arr
 
-    def _sphere(self, stamp, ns, mid, xy, r, g, b):
+    def _sphere(self, stamp, ns: str, mid: int, xy: Tuple[float, float], r: float, g: float, b: float) -> Marker:
         m = Marker()
         m.header.stamp = stamp
         m.header.frame_id = self.world_frame
@@ -124,13 +168,13 @@ class TrackingViz(Node):
         m.scale.x = 0.30
         m.scale.y = 0.30
         m.scale.z = 0.30
-        m.color.r = r
-        m.color.g = g
-        m.color.b = b
+        m.color.r = float(r)
+        m.color.g = float(g)
+        m.color.b = float(b)
         m.color.a = 1.0
         return m
 
-    def _trail(self, stamp, ns, mid, trail, r, g, b):
+    def _trail(self, stamp, ns: str, mid: int, trail: Deque[Tuple[float, float]], r: float, g: float, b: float) -> Marker:
         m = Marker()
         m.header.stamp = stamp
         m.header.frame_id = self.world_frame
@@ -140,11 +184,12 @@ class TrackingViz(Node):
         m.action = Marker.ADD
         m.pose.orientation.w = 1.0
         m.scale.x = 0.06
-        m.color.r = r
-        m.color.g = g
-        m.color.b = b
+        m.color.r = float(r)
+        m.color.g = float(g)
+        m.color.b = float(b)
         m.color.a = 0.95
-        pts = []
+
+        pts: List[Point] = []
         for (x, y) in trail:
             p = Point()
             p.x = float(x)
@@ -154,28 +199,33 @@ class TrackingViz(Node):
         m.points = pts
         return m
 
-    def on_timer(self):
+    def _on_timer(self) -> None:
         stamp = self.get_clock().now().to_msg()
+
         out = MarkerArray()
         out.markers.extend(self._sensor_markers(stamp))
 
-        # GT: yeşil
+        # GT (green)
         if self.gt_xy is not None:
             out.markers.append(self._sphere(stamp, "gt", 1000, self.gt_xy, 0.1, 0.9, 0.1))
             out.markers.append(self._trail(stamp, "gt_trail", 2000, self.gt_trail, 0.1, 0.9, 0.1))
 
-        # EKF: mavi
+        # EST (blue)
         if self.est_xy is not None:
-            out.markers.append(self._sphere(stamp, "ekf", 1001, self.est_xy, 0.1, 0.3, 0.95))
-            out.markers.append(self._trail(stamp, "ekf_trail", 2001, self.est_trail, 0.1, 0.3, 0.95))
+            out.markers.append(self._sphere(stamp, "est", 1001, self.est_xy, 0.1, 0.3, 0.95))
+            out.markers.append(self._trail(stamp, "est_trail", 2001, self.est_trail, 0.1, 0.3, 0.95))
 
-        self.pub.publish(out)
+        self._pub.publish(out)
 
 
-def main():
-    rclpy.init()
-    rclpy.spin(TrackingViz())
-    rclpy.shutdown()
+def main(args=None) -> None:
+    rclpy.init(args=args)
+    node = TrackingViz()
+    try:
+        rclpy.spin(node)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":
