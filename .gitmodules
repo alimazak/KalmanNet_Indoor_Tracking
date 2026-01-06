@@ -1,0 +1,3 @@
+[submodule "third_party/KalmanNet_TSP"]
+	path = third_party/KalmanNet_TSP
+	url = https://github.com/KalmanNet/KalmanNet_TSP
