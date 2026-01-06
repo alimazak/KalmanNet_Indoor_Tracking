@@ -6,3 +6,12 @@ log/
 # Python cache
 __pycache__/
 *.py[cod]
+build/
+install/
+log/
+datasets/
+experiments/.venv_knet/
+**/__pycache__/
+*.pyc
+models/**/weights*.pt
+models/**/*.pth
