@@ -5,14 +5,14 @@ gz_proxy_node.py
 Moves a Gazebo model (proxy) to the estimated pose so you can see estimator trail in Gazebo.
 
 Sub:
-  - est_topic (nav_msgs/Odometry) default: /tracking/estimated
+  - est_topic (nav_msgs/Odometry) default: /tracking/estimated (veya namespace içinde "estimated")
 
-Srv client:
+Service client:
   - /world/<gz_world>/set_pose  (ros_gz_interfaces/srv/SetEntityPose)
 
 Notes:
-  - If a request is in-flight, we keep only the latest pose and send it next
-    (so we don't flood the service but we also don't lag too much).
+  - Subscription sadece "son pozu" cache'ler.
+  - Timer (rate Hz) ile set_pose çağrısı yapılır -> flood olmaz.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from ros_gz_interfaces.srv import SetEntityPose
 
 
 @dataclass
-class _Pose2D:
+class _Pose:
     x: float
     y: float
     qx: float
@@ -43,76 +43,102 @@ class GazeboProxyNode(Node):
     def __init__(self) -> None:
         super().__init__("gz_proxy")
 
-        # ---------------- Params ----------------
+        # --- Params ---
         self.est_topic: str = str(self.declare_parameter("est_topic", "/tracking/estimated").value)
         self.gz_world: str = str(self.declare_parameter("gz_world", "empty_world").value)
         self.gz_entity: str = str(self.declare_parameter("gz_entity", "ekf_proxy").value)
         self.gz_z: float = float(self.declare_parameter("gz_z", 0.01).value)
 
+        # set_pose call rate (Hz) - limiter
+        self.rate_hz: float = float(self.declare_parameter("rate_hz", 10.0).value)
+
+        # If true, use odom orientation; else force identity quaternion
+        self.use_est_orientation: bool = bool(self.declare_parameter("use_est_orientation", False).value)
+
         self._srv_name = f"/world/{self.gz_world}/set_pose"
         self._cli = self.create_client(SetEntityPose, self._srv_name)
 
-        # ---------------- State ----------------
         self._pending: bool = False
-        self._dirty: bool = False
-        self._latest: Optional[_Pose2D] = None
+        self._last_pose: Optional[_Pose] = None
 
-        # ---------------- ROS I/O ----------------
+        # simple log throttles (sim-time aware)
+        self._last_wait_log_ns: int = 0
+        self._last_fail_log_ns: int = 0
+
+        # --- ROS I/O ---
         self.create_subscription(Odometry, self.est_topic, self._on_est, qos_profile_sensor_data)
 
+        period = 1.0 / max(self.rate_hz, 1e-6)
+        self.create_timer(period, self._on_timer)
+
         self.get_logger().info(
-            f"GZ proxy up. sub={self.est_topic} -> srv={self._srv_name} (entity={self.gz_entity}, z={self.gz_z})"
+            f"GZ proxy up: sub={self.est_topic} -> srv={self._srv_name} entity={self.gz_entity} "
+            f"(rate={self.rate_hz:.1f}Hz, use_est_orientation={self.use_est_orientation})"
         )
+
+    def _throttle_ok(self, last_ns: int, every_sec: float) -> bool:
+        now_ns = int(self.get_clock().now().nanoseconds)
+        if now_ns - last_ns >= int(every_sec * 1e9):
+            return True
+        return False
 
     def _on_est(self, msg: Odometry) -> None:
         p = msg.pose.pose.position
         q = msg.pose.pose.orientation
 
-        self._latest = _Pose2D(
-            x=float(p.x),
-            y=float(p.y),
-            qx=float(q.x),
-            qy=float(q.y),
-            qz=float(q.z),
-            qw=float(q.w) if (q.w != 0.0 or q.x != 0.0 or q.y != 0.0 or q.z != 0.0) else 1.0,
-        )
+        if self.use_est_orientation:
+            self._last_pose = _Pose(
+                x=float(p.x),
+                y=float(p.y),
+                qx=float(q.x),
+                qy=float(q.y),
+                qz=float(q.z),
+                qw=float(q.w),
+            )
+        else:
+            self._last_pose = _Pose(
+                x=float(p.x),
+                y=float(p.y),
+                qx=0.0,
+                qy=0.0,
+                qz=0.0,
+                qw=1.0,
+            )
+
+    def _on_timer(self) -> None:
+        if self._last_pose is None:
+            return
 
         if self._pending:
-            # request in-flight -> mark dirty and return
-            self._dirty = True
             return
 
-        # no pending request -> try send immediately
-        self._try_send_latest()
-
-    def _try_send_latest(self) -> None:
-        if self._latest is None:
-            return
         if not self._cli.service_is_ready():
-            return
-        if self._pending:
+            now_ns = int(self.get_clock().now().nanoseconds)
+            if self._throttle_ok(self._last_wait_log_ns, every_sec=5.0):
+                self._last_wait_log_ns = now_ns
+                self.get_logger().warn(f"Waiting for service: {self._srv_name}")
             return
 
-        pose = self._latest
+        pose = self._last_pose
 
         req = SetEntityPose.Request()
         req.entity.name = self.gz_entity
-        # Some distros expose entity.type
-        if hasattr(req.entity, "type"):
+        # type field exists in newer ros_gz_interfaces; safe-guard anyway
+        try:
             req.entity.type = Entity.MODEL
+        except Exception:
+            pass
 
-        req.pose.position.x = pose.x
-        req.pose.position.y = pose.y
+        req.pose.position.x = float(pose.x)
+        req.pose.position.y = float(pose.y)
         req.pose.position.z = float(self.gz_z)
 
-        # Forward orientation (even if estimator always outputs identity, this is safe)
-        req.pose.orientation.x = pose.qx
-        req.pose.orientation.y = pose.qy
-        req.pose.orientation.z = pose.qz
-        req.pose.orientation.w = pose.qw
+        req.pose.orientation.x = float(pose.qx)
+        req.pose.orientation.y = float(pose.qy)
+        req.pose.orientation.z = float(pose.qz)
+        req.pose.orientation.w = float(pose.qw)
 
         self._pending = True
-        self._dirty = False
         fut = self._cli.call_async(req)
         fut.add_done_callback(self._on_done)
 
@@ -120,22 +146,17 @@ class GazeboProxyNode(Node):
         self._pending = False
         try:
             fut.result()
-        except Exception as e:  # noqa: BLE001
-            self.get_logger().warn(f"set_pose failed: {e}")
+        except Exception as e:
+            now_ns = int(self.get_clock().now().nanoseconds)
+            if self._throttle_ok(self._last_fail_log_ns, every_sec=2.0):
+                self._last_fail_log_ns = now_ns
+                self.get_logger().warn(f"set_pose failed: {e}")
 
-        # If new pose arrived while pending, send latest now.
-        if self._dirty:
-            self._try_send_latest()
 
-
-def main(args=None) -> None:
-    rclpy.init(args=args)
-    node = GazeboProxyNode()
-    try:
-        rclpy.spin(node)
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
+def main() -> None:
+    rclpy.init()
+    rclpy.spin(GazeboProxyNode())
+    rclpy.shutdown()
 
 
 if __name__ == "__main__":
