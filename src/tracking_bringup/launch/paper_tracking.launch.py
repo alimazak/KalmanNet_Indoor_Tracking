@@ -43,6 +43,14 @@ def generate_launch_description():
     )
 
     sigma_arg = DeclareLaunchArgument("sigma", default_value="0.10", description="Range noise sigma (m)")
+    sigma_meas_arg = DeclareLaunchArgument(
+    "sigma_meas", default_value="",
+    description="True measurement noise used by range generator. Empty => use sigma"
+    )
+    sigma_ekf_arg = DeclareLaunchArgument(
+        "sigma_ekf", default_value="",
+        description="EKF assumed measurement noise (R). Empty => use sigma"
+    )
     rate_arg = DeclareLaunchArgument("rate", default_value="10.0", description="Range publish rate (Hz)")
     delta_arg = DeclareLaunchArgument("delta", default_value="0.1", description="EKF delta (s)")
     tau_arg = DeclareLaunchArgument("tau", default_value="1.0", description="EKF tau")
@@ -90,6 +98,8 @@ def generate_launch_description():
         layout_file = LaunchConfiguration("layout_file").perform(context)
 
         sigma = LaunchConfiguration("sigma").perform(context)
+        sigma_meas = LaunchConfiguration("sigma_meas").perform(context)
+        sigma_ekf = LaunchConfiguration("sigma_ekf").perform(context)
         rate = LaunchConfiguration("rate").perform(context)
         delta = LaunchConfiguration("delta").perform(context)
         tau = LaunchConfiguration("tau").perform(context)
@@ -182,7 +192,7 @@ def generate_launch_description():
             "range_measurement_generator",
             {
                 "layout_file": layout_file,
-                "sigma": sigma,
+                "sigma": sigma_meas,
                 "rate": rate,
                 "gt_topic": gt_odom_topic,
                 "z_topic": z_topic,
@@ -197,7 +207,7 @@ def generate_launch_description():
                 "layout_file": layout_file,
                 "z_topic": z_topic,
                 "est_topic": est_topic,
-                "sigma": sigma,
+                "sigma": sigma_ekf,
                 "delta": delta,
                 "tau": tau,
                 "init_from_gt": init_from_gt,
@@ -281,7 +291,7 @@ def generate_launch_description():
     return LaunchDescription([
         world_name_arg,
         layout_file_arg,
-        sigma_arg, rate_arg, delta_arg, tau_arg,
+        sigma_arg, sigma_meas_arg, sigma_ekf_arg, rate_arg, delta_arg, tau_arg,
         init_from_gt_arg,
         tracking_ns_arg,
         use_sim_time_arg,
