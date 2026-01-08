@@ -7,7 +7,7 @@
   "min_range": 0.001,
   "eps_range": 1e-06,
   "train": {
-    "n_steps": 500,
+    "n_steps": 300,
     "n_batch": 10,
     "lr": 0.0001,
     "wd": 1e-06,
@@ -20,6 +20,12 @@
   },
   "artifacts": {
     "best_model": "models/knet_range_v2/best-model.pt",
-    "summary_json": "models/knet_range_v2/summary.json"
+    "summary_json": "models/knet_range_v2/summary.json",
+    "preds": "models/knet_range_v2/test_predictions.pt"
+  },
+  "test": {
+    "mse_avg": 215624892416.0,
+    "mse_avg_db": 113.33699035644531,
+    "elapsed_sec": 0.057703495025634766
   }
 }
