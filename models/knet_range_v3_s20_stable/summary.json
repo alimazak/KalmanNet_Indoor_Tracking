@@ -1,0 +1,31 @@
+{
+  "data": "datasets/pt/range_v3_s20.pt",
+  "layout_file": "config/paper_sensors_5x5_b20.csv",
+  "dt": 0.1,
+  "tau": 1.0,
+  "sigma": 0.1,
+  "min_range": 0.001,
+  "eps_range": 1e-06,
+  "train": {
+    "n_steps": 4000,
+    "n_batch": 20,
+    "lr": 1e-05,
+    "wd": 1e-06,
+    "in_mult_KNet": 5,
+    "out_mult_KNet": 1,
+    "grad_clip": 0.5,
+    "filter_bad_seq": true,
+    "max_residual_rms": 2.0,
+    "max_speed": 20.0
+  },
+  "artifacts": {
+    "best_model": "models/knet_range_v3_s20_stable/best-model.pt",
+    "summary_json": "models/knet_range_v3_s20_stable/summary.json",
+    "preds": "models/knet_range_v3_s20_stable/test_predictions.pt"
+  },
+  "test": {
+    "mse_avg": 6.751890182495117,
+    "mse_avg_db": 8.294254302978516,
+    "elapsed_sec": 0.1080622673034668
+  }
+}
