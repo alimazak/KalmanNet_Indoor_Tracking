@@ -22,7 +22,6 @@ def _find_ws_root() -> Path:
     for p in [here] + list(here.parents):
         if (p / "scripts").is_dir() and (p / "src").is_dir():
             return p
-    # fallback (legacy)
     return Path.home() / "KalmanNet_Indoor_Tracking"
 
 
@@ -44,13 +43,14 @@ def generate_launch_description():
 
     sigma_arg = DeclareLaunchArgument("sigma", default_value="0.10", description="Range noise sigma (m)")
     sigma_meas_arg = DeclareLaunchArgument(
-    "sigma_meas", default_value="",
-    description="True measurement noise used by range generator. Empty => use sigma"
+        "sigma_meas", default_value="",
+        description="True measurement noise used by range generator. Empty => use sigma"
     )
     sigma_ekf_arg = DeclareLaunchArgument(
         "sigma_ekf", default_value="",
         description="EKF assumed measurement noise (R). Empty => use sigma"
     )
+
     rate_arg = DeclareLaunchArgument("rate", default_value="10.0", description="Range publish rate (Hz)")
     delta_arg = DeclareLaunchArgument("delta", default_value="0.1", description="EKF delta (s)")
     tau_arg = DeclareLaunchArgument("tau", default_value="1.0", description="EKF tau")
@@ -74,9 +74,28 @@ def generate_launch_description():
         "gz_world", default_value="empty_world",
         description="Gazebo world name (SetEntityPose service yolu için)."
     )
+
     gz_entity_arg = DeclareLaunchArgument(
         "gz_entity", default_value="ekf_proxy",
-        description="Gazebo'da proxy model adı (gz_proxy_node bunu set_pose ile sürer)"
+        description="Gazebo'da EKF proxy model adı (gz_proxy_node bunu set_pose ile sürer)"
+    )
+
+    # --- NEW: KNet proxy args ---
+    enable_knet_proxy_arg = DeclareLaunchArgument(
+        "enable_knet_proxy", default_value="false",
+        description="Gazebo'da ikinci proxy (KNet) gösterilsin mi?"
+    )
+    knet_est_topic_arg = DeclareLaunchArgument(
+        "knet_est_topic", default_value="knet/estimated",
+        description="KNet estimated odom topic (tracking namespace altında, relative)."
+    )
+    gz_entity_knet_arg = DeclareLaunchArgument(
+        "gz_entity_knet", default_value="knet_proxy",
+        description="Gazebo'da KNet proxy model adı"
+    )
+    gz_z_knet_arg = DeclareLaunchArgument(
+        "gz_z_knet", default_value="0.02",
+        description="KNet proxy için Gazebo z offset"
     )
 
     publish_world_tf_arg = DeclareLaunchArgument(
@@ -97,9 +116,16 @@ def generate_launch_description():
         world_name = LaunchConfiguration("world_name").perform(context)
         layout_file = LaunchConfiguration("layout_file").perform(context)
 
-        sigma = LaunchConfiguration("sigma").perform(context)
-        sigma_meas = LaunchConfiguration("sigma_meas").perform(context)
-        sigma_ekf = LaunchConfiguration("sigma_ekf").perform(context)
+        sigma = LaunchConfiguration("sigma").perform(context).strip()
+        sigma_meas = LaunchConfiguration("sigma_meas").perform(context).strip()
+        sigma_ekf = LaunchConfiguration("sigma_ekf").perform(context).strip()
+
+        # IMPORTANT: Empty => fallback to sigma (prevents range/ekf scripts crashing)
+        if not sigma_meas:
+            sigma_meas = sigma
+        if not sigma_ekf:
+            sigma_ekf = sigma
+
         rate = LaunchConfiguration("rate").perform(context)
         delta = LaunchConfiguration("delta").perform(context)
         tau = LaunchConfiguration("tau").perform(context)
@@ -113,6 +139,11 @@ def generate_launch_description():
 
         gz_world = LaunchConfiguration("gz_world").perform(context)
         gz_entity = LaunchConfiguration("gz_entity").perform(context)
+
+        # KNet proxy params
+        knet_est_topic = LaunchConfiguration("knet_est_topic").perform(context)
+        gz_entity_knet = LaunchConfiguration("gz_entity_knet").perform(context)
+        gz_z_knet = LaunchConfiguration("gz_z_knet").perform(context)
 
         # --- Gazebo include ---
         gazebo_launch = IncludeLaunchDescription(
@@ -146,24 +177,21 @@ def generate_launch_description():
         # --- Scripts dir (auto-detected) ---
         scripts_dir = ws_root / "scripts"
 
-        def py_exec(script_name: str, node_name: str, params: dict) -> ExecuteProcess:
+        def py_exec(script_name: str, node_name: str, params: dict, condition=None) -> ExecuteProcess:
             script_path = str(scripts_dir / script_name)
             cmd = [
                 "python3",
                 script_path,
                 "--ros-args",
-                "-r",
-                ns_remap,
-                "-r",
-                f"__node:={node_name}",
-                "-p",
-                f"use_sim_time:={use_sim_time}",
+                "-r", ns_remap,
+                "-r", f"__node:={node_name}",
+                "-p", f"use_sim_time:={use_sim_time}",
             ]
             for k, v in params.items():
                 cmd += ["-p", f"{k}:={v}"]
-            return ExecuteProcess(cmd=cmd, output="screen")
+            return ExecuteProcess(cmd=cmd, output="screen", condition=condition)
 
-        # Relative topic names (namespace altında toplanır)
+        # Relative topic names (namespace altında)
         gt_odom_topic = "gt/odom"
         z_topic = "z"
         zmin_topic = "range/min"
@@ -228,7 +256,8 @@ def generate_launch_description():
             },
         )
 
-        gz_proxy = py_exec(
+        # EKF proxy (Gazebo)
+        gz_proxy_ekf = py_exec(
             "gz_proxy_node.py",
             "gz_proxy",
             {
@@ -238,6 +267,20 @@ def generate_launch_description():
                 "gz_z": "0.01",
                 "rate_hz": rate,
             },
+        )
+
+        # NEW: KNet proxy (Gazebo)
+        gz_proxy_knet = py_exec(
+            "gz_proxy_node.py",
+            "gz_proxy_knet",
+            {
+                "est_topic": knet_est_topic,   # e.g. "knet/estimated"
+                "gz_world": gz_world,
+                "gz_entity": gz_entity_knet,   # e.g. "knet_proxy"
+                "gz_z": gz_z_knet,
+                "rate_hz": rate,
+            },
+            condition=IfCondition(LaunchConfiguration("enable_knet_proxy")),
         )
 
         viz = py_exec(
@@ -283,7 +326,18 @@ def generate_launch_description():
 
         pipeline_delayed = TimerAction(
             period=2.0,
-            actions=[bridge_dynamicposes, gt_odom, range_gen, ekf, metrics, gz_proxy, viz, static_tf, rviz],
+            actions=[
+                bridge_dynamicposes,
+                gt_odom,
+                range_gen,
+                ekf,
+                metrics,
+                gz_proxy_ekf,
+                gz_proxy_knet,   # <- KNet proxy burada
+                viz,
+                static_tf,
+                rviz,
+            ],
         )
 
         return [gazebo_launch, controller_delayed, pipeline_delayed]
@@ -296,6 +350,10 @@ def generate_launch_description():
         tracking_ns_arg,
         use_sim_time_arg,
         gz_world_arg, gz_entity_arg,
+
+        # NEW args
+        enable_knet_proxy_arg, knet_est_topic_arg, gz_entity_knet_arg, gz_z_knet_arg,
+
         publish_world_tf_arg,
         use_rviz_arg, rviz_config_arg,
         OpaqueFunction(function=launch_setup),

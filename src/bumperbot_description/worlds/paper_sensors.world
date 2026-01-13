@@ -427,6 +427,14 @@
     <!-- Bilerek visual/collision YOK: görünmez proxy -->
     <link name="link"/>
   </model>
+  <model name="knet_proxy">
+    <static>true</static>
+    <pose>0 0 0.01 0 0 0</pose>
+    <!-- Görünmez proxy: visual/collision yok -->
+    <link name="link"/>
+  </model>
+
+
 
 </world>
 </sdf> 
