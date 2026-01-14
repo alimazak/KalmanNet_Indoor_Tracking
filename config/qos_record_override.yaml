@@ -1,0 +1,19 @@
+/tracking/z:
+  reliability: best_effort
+  durability: volatile
+  history: keep_all
+
+/tracking/gt/odom:
+  reliability: best_effort
+  durability: volatile
+  history: keep_all
+
+/tracking/estimated:
+  reliability: best_effort
+  durability: volatile
+  history: keep_all
+
+/clock:
+  reliability: best_effort
+  durability: volatile
+  history: keep_all
