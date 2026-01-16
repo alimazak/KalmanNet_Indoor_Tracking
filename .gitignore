@@ -15,3 +15,6 @@ experiments/.venv_knet/
 *.pyc
 models/**/weights*.pt
 models/**/*.pth
+
+# local backups
+models/**/best-model.pt.BACKUP_*
